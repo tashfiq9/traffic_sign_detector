@@ -1,7 +1,10 @@
 $(document).ready(function () {
     console.log("JS loaded");
 
-    // ── Show a hint when switching to heavy models ─────────────────────────
+    // Track which models have been confirmed ready this session
+    var modelsReady = { cnn: false, eff: false, mob: false };
+
+    // ── Show hint when switching to heavy models ───────────────────────
     $('#modelSelect').on('change', function () {
         var selected = $(this).val();
         if (selected === 'eff' || selected === 'mob') {
@@ -11,34 +14,21 @@ $(document).ready(function () {
         }
     });
 
-    $(document).on('click', '#btn-predict', function (e) {
-        e.preventDefault();
-        console.log("Predict clicked");
+    // ── Core predict function (called directly and on retry) ──────────
+    function runPredict(retryCount) {
+        retryCount = retryCount || 0;
 
-        // Validate file
         var file_input = $('#imageUpload')[0];
         if (!file_input.files || file_input.files.length === 0) {
             alert("Please select an image file first.");
+            $('#btn-predict').prop('disabled', false).text('Predict');
             return;
         }
 
         var selectedModel = $('#modelSelect').val();
-
-        // Build form data
         var form_data = new FormData();
         form_data.append('file',  file_input.files[0]);
         form_data.append('model', selectedModel);
-
-        // Show loading state
-        $('#result-box').hide();
-        $('#result-error').hide();
-        $('#model-hint').text('');
-
-        // FIX: Show a specific message for heavy models on first load
-        var loadingText = (selectedModel === 'eff' || selectedModel === 'mob')
-            ? 'Loading model (first time only)...'
-            : 'Predicting...';
-        $('#btn-predict').prop('disabled', true).text(loadingText);
 
         $.ajax({
             url:         '/predict',
@@ -46,16 +36,15 @@ $(document).ready(function () {
             data:        form_data,
             contentType: false,
             processData: false,
-
-            // FIX: Set 90s timeout so the browser waits long enough for
-            // first-time model downloads (~30-60s) without killing the request.
-            timeout: 90000,
+            timeout:     90000,
 
             success: function (data) {
-                console.log(data);
                 if (data.error) {
                     $('#result-error').text("Error: " + data.error).show();
+                    $('#btn-predict').prop('disabled', false).text('Predict');
                 } else {
+                    modelsReady[selectedModel] = true;
+                    $('#model-hint').text('');
                     $('#result-text').text(data.result);
                     $('#result-meta').html(
                         '<span class="badge-model">' + data.model + '</span>' +
@@ -63,27 +52,77 @@ $(document).ready(function () {
                         ' &nbsp; Class ID: <strong>' + data.class_id + '</strong>'
                     );
                     $('#result-box').show();
-                    // Clear the hint once model has loaded successfully
-                    $('#model-hint').text('');
+                    $('#btn-predict').prop('disabled', false).text('Predict');
                 }
             },
 
-            // FIX: Distinguish between a timeout and a real server error
             error: function (xhr, textStatus) {
-                console.error(textStatus, xhr.responseText);
-                var msg;
-                if (textStatus === 'timeout') {
-                    msg = 'Request timed out — the model is still loading. Please try again in a moment.';
-                } else {
-                    msg = "An error occurred.";
-                    try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) {}
-                }
-                $('#result-error').text("Error: " + msg).show();
-            },
+                var responseData = {};
+                try { responseData = JSON.parse(xhr.responseText); } catch(e) {}
+                var isStillLoading = xhr.status === 503 &&
+                    responseData.error && responseData.error.indexOf('still loading') !== -1;
 
-            complete: function () {
-                $('#btn-predict').prop('disabled', false).text('Predict');
+                if (isStillLoading && retryCount < 24) {
+                    // Auto-retry every 5 seconds, up to 24 times (= 2 minutes max wait)
+                    var secondsLeft = (24 - retryCount) * 5;
+                    var countdown   = 5;
+
+                    $('#model-hint').text(
+                        '⏳ Models are loading on the server, retrying in ' + countdown + 's... ' +
+                        '(up to ' + secondsLeft + 's remaining)'
+                    );
+
+                    // Live countdown display
+                    var countInterval = setInterval(function () {
+                        countdown--;
+                        if (countdown > 0) {
+                            $('#model-hint').text(
+                                '⏳ Models are loading on the server, retrying in ' + countdown + 's... ' +
+                                '(up to ' + ((24 - retryCount) * 5 - (5 - countdown)) + 's remaining)'
+                            );
+                        } else {
+                            clearInterval(countInterval);
+                        }
+                    }, 1000);
+
+                    setTimeout(function () {
+                        clearInterval(countInterval);
+                        runPredict(retryCount + 1);
+                    }, 5000);
+
+                } else if (textStatus === 'timeout') {
+                    $('#result-error').text(
+                        'Request timed out — the model is still loading. Please try again in a moment.'
+                    ).show();
+                    $('#btn-predict').prop('disabled', false).text('Predict');
+                } else {
+                    var msg = responseData.error || "An error occurred.";
+                    $('#result-error').text("Error: " + msg).show();
+                    $('#btn-predict').prop('disabled', false).text('Predict');
+                }
             }
         });
+    }
+
+    // ── Predict button click ───────────────────────────────────────────
+    $(document).on('click', '#btn-predict', function (e) {
+        e.preventDefault();
+
+        var file_input = $('#imageUpload')[0];
+        if (!file_input.files || file_input.files.length === 0) {
+            alert("Please select an image file first.");
+            return;
+        }
+
+        var selectedModel = $('#modelSelect').val();
+        var loadingText   = (selectedModel === 'eff' || selectedModel === 'mob') && !modelsReady[selectedModel]
+            ? 'Loading model (first time only)...'
+            : 'Predicting...';
+
+        $('#result-box').hide();
+        $('#result-error').hide();
+        $('#btn-predict').prop('disabled', true).text(loadingText);
+
+        runPredict(0);
     });
 });
