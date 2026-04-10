@@ -13,8 +13,6 @@ from keras.layers import (
     Conv2D, MaxPool2D, Dense, Flatten,
     Dropout, BatchNormalization, Input
 )
-from keras.applications.efficientnet import preprocess_input as eff_preprocess
-from keras.applications.mobilenet_v2 import preprocess_input as mob_preprocess
 
 app = Flask(__name__)
 
@@ -50,7 +48,7 @@ def log(msg):
     print(msg, flush=True)
 
 
-# ---------------- EXACT CNN ARCHITECTURE (MATCH TRAINING) ----------------
+# ---------------- CNN (EXACT SAME AS TRAINING) ----------------
 def build_cnn():
     model = Sequential([
         Input(shape=(48, 48, 3)),
@@ -101,7 +99,7 @@ def download_model(key, dest):
                 f.write(chunk)
 
 
-# ---------------- LOAD MODEL (LAZY) ----------------
+# ---------------- LOAD MODEL ----------------
 def get_model(key):
     if key in _model_cache:
         return _model_cache[key]
@@ -127,7 +125,7 @@ def get_model(key):
         return model
 
 
-# ---------------- CLASSES ----------------
+# ---------------- CLASS LABELS ----------------
 CLASSES = {
     0:'Speed limit (20km/h)',        1:'Speed limit (30km/h)',
     2:'Speed limit (50km/h)',        3:'Speed limit (60km/h)',
@@ -154,16 +152,16 @@ CLASSES = {
 }
 
 
-# ---------------- PREPROCESS ----------------
+# ---------------- FIXED PREPROCESSING ----------------
 def preprocess_image(img_path, model_key):
     size = MODEL_IMG_SIZES[model_key]
-    img = Image.open(img_path).convert('RGB').resize((size, size))
-    arr = np.array(img, dtype=np.float32) / 255.0
 
-    if model_key == 'eff':
-        arr = eff_preprocess(arr * 255.0)
-    elif model_key == 'mob':
-        arr = mob_preprocess(arr * 255.0)
+    img = Image.open(img_path).convert('RGB').resize((size, size))
+
+    arr = np.array(img, dtype=np.float32)
+
+    # IMPORTANT: match training (most likely used this)
+    arr = arr / 255.0
 
     return np.expand_dims(arr, axis=0)
 
