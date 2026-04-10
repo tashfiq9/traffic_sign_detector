@@ -45,12 +45,18 @@ MODEL_FILENAMES = {
 
 AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
-# ── Thread-safe model cache ───────────────────────────────────────────────
+# ── Per-model threading primitives ────────────────────────────────────────
 _model_cache   = {}
-_load_locks    = {key: threading.Lock() for key in AVAILABLE_MODELS}
-_predict_locks = {key: threading.Lock() for key in AVAILABLE_MODELS}
+_load_locks    = {key: threading.Lock()  for key in AVAILABLE_MODELS}
+_predict_locks = {key: threading.Lock()  for key in AVAILABLE_MODELS}
 
-# ── Warmup status — lets /ready report progress to the browser ────────────
+# KEY FIX: threading.Event per model.
+# The warmup thread calls .set() when a model is ready.
+# Any /predict request for that model calls .wait(timeout) and simply
+# BLOCKS until the event fires — no 503, no client retries needed.
+_model_events  = {key: threading.Event() for key in AVAILABLE_MODELS}
+
+# Human-readable status for /ready endpoint only
 _warmup_status = {key: 'pending' for key in AVAILABLE_MODELS}
 
 # ── Custom preprocessing layers ───────────────────────────────────────────
@@ -124,7 +130,7 @@ def _download_model(key, dest):
 
 
 def get_model(key):
-    """Load model on first use — thread-safe with double-checked locking."""
+    """Load model on first use — thread-safe."""
     if key in _model_cache:
         return _model_cache[key]
 
@@ -151,31 +157,27 @@ def get_model(key):
                 os.remove(dest)
             raise RuntimeError(f"Failed to load model '{key}': {e}")
 
-        _model_cache[key] = model
+        _model_cache[key]  = model
         _warmup_status[key] = 'ready'
-        print(f"  ✓ '{key}' ready (input size: {MODEL_IMG_SIZES[key]}x{MODEL_IMG_SIZES[key]})")
+        _model_events[key].set()   # ← unblocks any waiting /predict requests
+        print(f"  ✓ '{key}' ready (input: {MODEL_IMG_SIZES[key]}x{MODEL_IMG_SIZES[key]})")
         return model
 
 
 def _warmup_all_models():
-    """
-    Runs in a background thread at startup.
-    Loads all 3 models ONE AT A TIME (sequential) to avoid OOM on
-    Render's 512 MB free tier. After this finishes, every predict
-    request is instant — no cold download ever happens mid-request.
-    """
-    print("[Warmup] Starting background model warmup ...")
-    for key in AVAILABLE_MODELS:   # cnn first (smallest), then eff, then mob
+    """Background thread: loads all models at startup, one at a time."""
+    print("[Warmup] Starting ...")
+    for key in AVAILABLE_MODELS:
         try:
             get_model(key)
             print(f"[Warmup] '{key}' ✓")
         except Exception as e:
+            _warmup_status[key] = 'failed'
+            _model_events[key].set()   # unblock waiters even on failure
             print(f"[Warmup] '{key}' FAILED: {e}")
-    print("[Warmup] All models ready.")
+    print("[Warmup] Done.")
 
 
-# Start warmup immediately when gunicorn imports this module.
-# daemon=True so the thread doesn't block a clean shutdown.
 threading.Thread(target=_warmup_all_models, daemon=True).start()
 
 
@@ -221,7 +223,7 @@ def index():
 
 @app.route('/ready')
 def ready():
-    """Health-check: visit /ready in your browser to see warmup progress."""
+    """Health-check: visit /ready to see warmup progress."""
     all_ready = all(s == 'ready' for s in _warmup_status.values())
     return jsonify({
         'status': 'ready' if all_ready else 'warming_up',
@@ -243,17 +245,16 @@ def predict():
         if model_key not in AVAILABLE_MODELS:
             return jsonify({'error': f"Invalid model. Choose from: {AVAILABLE_MODELS}"}), 400
 
-        # Block the request with a clear message if warmup hasn't finished yet.
-        # This prevents gunicorn from timing out mid-download.
-        status = _warmup_status.get(model_key, 'pending')
-        if status in ('pending', 'loading'):
-            return jsonify({
-                'error': f"Model '{model_key.upper()}' is still loading, please wait a moment and try again."
-            }), 503
-        if status == 'failed':
-            return jsonify({
-                'error': f"Model '{model_key.upper()}' failed to load on startup. Please redeploy."
-            }), 503
+        # ── BLOCK here until the model is ready (max 4 minutes) ──────────
+        # This is the key fix: instead of returning 503 and making the
+        # client retry, we simply wait server-side. The gunicorn gthread
+        # worker keeps other threads free while this one waits.
+        MODEL_LOAD_TIMEOUT = 240  # seconds
+        is_ready = _model_events[model_key].wait(timeout=MODEL_LOAD_TIMEOUT)
+        if not is_ready:
+            return jsonify({'error': 'Model took too long to load. Please try again.'}), 503
+        if _warmup_status[model_key] == 'failed':
+            return jsonify({'error': f"Model '{model_key.upper()}' failed to load. Please redeploy."}), 503
 
         filename    = secure_filename(f.filename)
         unique_name = f"{threading.get_ident()}_{filename}"
