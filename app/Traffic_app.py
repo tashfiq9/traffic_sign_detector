@@ -1,6 +1,5 @@
 from flask import Flask, render_template, request, jsonify
 import os
-import sys
 import time
 import threading
 from werkzeug.utils import secure_filename
@@ -46,22 +45,49 @@ AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 _model_cache = {}
 _load_locks  = {key: threading.Lock() for key in AVAILABLE_MODELS}
 
+
 def log(msg):
     print(msg, flush=True)
 
-# ---------------- CNN ----------------
+
+# ---------------- EXACT CNN ARCHITECTURE (MATCH TRAINING) ----------------
 def build_cnn():
     model = Sequential([
         Input(shape=(48, 48, 3)),
-        Conv2D(32, (3,3), activation='relu'), MaxPool2D(),
-        Conv2D(64, (3,3), activation='relu'), MaxPool2D(),
+
+        Conv2D(32, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        Conv2D(32, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        MaxPool2D((2,2)),
+        Dropout(0.2),
+
+        Conv2D(64, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        Conv2D(64, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        MaxPool2D((2,2)),
+        Dropout(0.2),
+
+        Conv2D(128, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        Conv2D(128, (3,3), padding='same', activation='relu'),
+        BatchNormalization(),
+        MaxPool2D((2,2)),
+        Dropout(0.2),
+
         Flatten(),
-        Dense(128, activation='relu'),
+
+        Dense(512, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.4),
+
         Dense(NUM_CLASSES, activation='softmax')
     ])
     return model
 
-# ---------------- Download ----------------
+
+# ---------------- DOWNLOAD ----------------
 def download_model(key, dest):
     file_id = DRIVE_IDS[key]
     url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
@@ -74,7 +100,8 @@ def download_model(key, dest):
             if chunk:
                 f.write(chunk)
 
-# ---------------- Load Model (LAZY) ----------------
+
+# ---------------- LOAD MODEL (LAZY) ----------------
 def get_model(key):
     if key in _model_cache:
         return _model_cache[key]
@@ -99,25 +126,58 @@ def get_model(key):
         _model_cache[key] = model
         return model
 
-# ---------------- Classes ----------------
-CLASSES = {i: f"Class {i}" for i in range(43)}
 
-# ---------------- Preprocess ----------------
-def preprocess(img_path, model_key):
+# ---------------- CLASSES ----------------
+CLASSES = {
+    0:'Speed limit (20km/h)',        1:'Speed limit (30km/h)',
+    2:'Speed limit (50km/h)',        3:'Speed limit (60km/h)',
+    4:'Speed limit (70km/h)',        5:'Speed limit (80km/h)',
+    6:'End of speed limit (80km/h)', 7:'Speed limit (100km/h)',
+    8:'Speed limit (120km/h)',       9:'No passing',
+    10:'No passing veh over 3.5 tons', 11:'Right-of-way at intersection',
+    12:'Priority road',              13:'Yield',
+    14:'Stop',                       15:'No vehicles',
+    16:'Vehicle > 3.5 tons prohibited', 17:'No entry',
+    18:'General caution',            19:'Dangerous curve left',
+    20:'Dangerous curve right',      21:'Double curve',
+    22:'Bumpy road',                 23:'Slippery road',
+    24:'Road narrows on the right',  25:'Road work',
+    26:'Traffic signals',            27:'Pedestrians',
+    28:'Children crossing',          29:'Bicycles crossing',
+    30:'Beware of ice/snow',         31:'Wild animals crossing',
+    32:'End speed + passing limits', 33:'Turn right ahead',
+    34:'Turn left ahead',            35:'Ahead only',
+    36:'Go straight or right',       37:'Go straight or left',
+    38:'Keep right',                 39:'Keep left',
+    40:'Roundabout mandatory',       41:'End of no passing',
+    42:'End no passing vehicle > 3.5 tons'
+}
+
+
+# ---------------- PREPROCESS ----------------
+def preprocess_image(img_path, model_key):
     size = MODEL_IMG_SIZES[model_key]
     img = Image.open(img_path).convert('RGB').resize((size, size))
-    arr = np.array(img) / 255.0
-    return np.expand_dims(arr, 0)
+    arr = np.array(img, dtype=np.float32) / 255.0
 
-# ---------------- Routes ----------------
+    if model_key == 'eff':
+        arr = eff_preprocess(arr * 255.0)
+    elif model_key == 'mob':
+        arr = mob_preprocess(arr * 255.0)
+
+    return np.expand_dims(arr, axis=0)
+
+
+# ---------------- ROUTES ----------------
 @app.route('/')
 def index():
     return render_template('index.html', available_models=AVAILABLE_MODELS)
 
+
 @app.route('/ready')
 def ready():
-    # Always ready (no blocking warmup anymore)
     return jsonify({'all_ready': True})
+
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -133,11 +193,11 @@ def predict():
 
         model = get_model(model_key)
 
-        X = preprocess(file_path, model_key)
+        X = preprocess_image(file_path, model_key)
 
         start = time.time()
-        pred = model.predict(X)
-        log(f"Prediction time: {time.time() - start:.2f}s")
+        pred = model.predict(X, verbose=0)
+        log(f"{model_key} prediction took {time.time() - start:.2f}s")
 
         pred_class = int(np.argmax(pred))
         confidence = float(np.max(pred) * 100)
@@ -155,6 +215,7 @@ def predict():
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
+
 
 if __name__ == '__main__':
     app.run()
