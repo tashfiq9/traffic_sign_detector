@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: traffic-sign-detector
+    env: python
+    region: oregon
+    plan: free
+    rootDir: app
+    buildCommand: pip install -r requirements.txt
+    startCommand: PYTHONUNBUFFERED=1 gunicorn Traffic_app:app --worker-class gthread --workers 1 --threads 4 --timeout 300
+    healthCheckPath: /ready
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

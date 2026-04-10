@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import sys
+import time
 import threading
 from werkzeug.utils import secure_filename
 import numpy as np
@@ -22,7 +23,6 @@ app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 NUM_CLASSES = 43
-
 MODEL_IMG_SIZES = {'cnn': 48, 'eff': 96, 'mob': 96}
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -40,17 +40,18 @@ MODEL_FILENAMES = {
     'mob': 'MobileNetV2_fixed.keras',
 }
 
-AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
-
+AVAILABLE_MODELS    = ['cnn', 'eff', 'mob']
 _model_cache        = {}
 _load_locks         = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _predict_locks      = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _warmup_status      = {key: 'pending' for key in AVAILABLE_MODELS}
 _download_file_lock = threading.Lock()
 
+# Max seconds allowed for a single model download (rate-limited trickle = fail fast)
+MAX_DOWNLOAD_SECONDS = 180
+
 
 def log(msg):
-    """Print with immediate flush — gunicorn buffers stdout by default."""
     print(msg, flush=True)
     sys.stdout.flush()
 
@@ -94,14 +95,12 @@ def build_cnn():
 
 def _download_model(key, dest):
     """
-    Download from Google Drive using the new usercontent.google.com URL.
-    The old drive.google.com/uc?export=download URL now returns an HTML
-    warning page instead of the file. The new URL bypasses that entirely.
+    Download from Google Drive using usercontent URL.
+    Enforces a hard wall-clock timeout so rate-limited/slow downloads
+    fail fast and retry, instead of trickling forever.
     """
     file_id = DRIVE_IDS[key]
     MAX_RETRIES = 3
-
-    # New Google Drive direct download URL (works without confirmation cookies)
     DOWNLOAD_URL = (
         f"https://drive.usercontent.google.com/download"
         f"?id={file_id}&export=download&authuser=0&confirm=t"
@@ -119,11 +118,12 @@ def _download_model(key, dest):
                     os.remove(tmp)
 
                 log(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
+                t_start = time.time()
 
                 resp = _requests.get(
                     DOWNLOAD_URL,
                     stream=True,
-                    timeout=(30, 300),
+                    timeout=(30, 60),        # 30s connect, 60s per-chunk read
                     headers={'User-Agent': 'Mozilla/5.0'},
                 )
                 resp.raise_for_status()
@@ -135,14 +135,24 @@ def _download_model(key, dest):
                             f.write(chunk)
                             total += len(chunk)
 
+                        # Hard wall-clock limit — kills rate-limited trickle downloads
+                        elapsed = time.time() - t_start
+                        if elapsed > MAX_DOWNLOAD_SECONDS:
+                            raise RuntimeError(
+                                f"Download exceeded {MAX_DOWNLOAD_SECONDS}s "
+                                f"({total // 1024} KB downloaded so far) — "
+                                "Google Drive may be rate-limiting. Retrying."
+                            )
+
                 if total < 1024 * 100:
                     raise RuntimeError(
-                        f"File too small after download ({total} bytes) — "
-                        "probably received an HTML error page."
+                        f"File too small ({total} bytes) — "
+                        "probably received an HTML error page instead of the model."
                     )
 
                 os.replace(tmp, dest)
-                log(f"  ✓ '{key}' downloaded ({total // 1024} KB)")
+                elapsed = time.time() - t_start
+                log(f"  ✓ '{key}' downloaded ({total // 1024} KB in {elapsed:.1f}s)")
                 return
 
             except Exception as e:
@@ -152,7 +162,10 @@ def _download_model(key, dest):
                         os.remove(tmp)
                     except OSError:
                         pass
-                if attempt == MAX_RETRIES:
+                if attempt < MAX_RETRIES:
+                    log(f"  Waiting 10s before retry ...")
+                    time.sleep(10)   # brief pause between retries avoids instant re-rate-limit
+                else:
                     raise RuntimeError(
                         f"Failed to download '{key}' after {MAX_RETRIES} attempts: {e}"
                     )
