@@ -19,12 +19,18 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-IMG_SIZE    = 48
 NUM_CLASSES = 43
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(APP_DIR, 'models')
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+# ✅ Model-specific image sizes
+MODEL_IMG_SIZES = {
+    'cnn': 48,
+    'eff': 96,
+    'mob': 96
+}
 
 # ── Google Drive file IDs ─────────────────────────────────────────────────
 DRIVE_IDS = {
@@ -38,10 +44,8 @@ MODEL_FILENAMES = {
     'mob': 'MobileNetV2_fixed.keras',
 }
 
-# All 3 models are always available in the dropdown
 AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
-# ── Lazy model cache — loaded on first use ────────────────────────────────
 _model_cache = {}
 
 # ── Custom preprocessing layers ───────────────────────────────────────────
@@ -65,25 +69,28 @@ CUSTOM_OBJECTS = {
 # ── CNN architecture ──────────────────────────────────────────────────────
 def build_cnn():
     model = Sequential([
-        Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+        Input(shape=(48, 48, 3)),
         Conv2D(32, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         Conv2D(32, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         MaxPool2D(pool_size=(2,2)),
         Dropout(0.2),
+
         Conv2D(64, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         Conv2D(64, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         MaxPool2D(pool_size=(2,2)),
         Dropout(0.2),
+
         Conv2D(128, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         Conv2D(128, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         MaxPool2D(pool_size=(2,2)),
         Dropout(0.2),
+
         Flatten(),
         Dense(512, activation='relu'),
         BatchNormalization(),
@@ -92,18 +99,16 @@ def build_cnn():
     ])
     return model
 
+# ── Load model ────────────────────────────────────────────────────────────
 def get_model(key):
-    """Download (if needed) and load a model on first use."""
     if key in _model_cache:
         return _model_cache[key]
 
-    # Download if not on disk
     dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
     if not os.path.exists(dest):
         print(f"Downloading '{key}' from Google Drive ...")
         gdown.download(id=DRIVE_IDS[key], output=dest, quiet=False)
 
-    # Load
     print(f"Loading '{key}' ...")
     if key == 'cnn':
         model = build_cnn()
@@ -142,9 +147,12 @@ CLASSES = {
 }
 
 # ── Preprocessing ─────────────────────────────────────────────────────────
-def preprocess_image(img_path):
-    image = Image.open(img_path).convert('RGB').resize((IMG_SIZE, IMG_SIZE))
-    arr   = np.array(image, dtype=np.float32) / 255.0
+def preprocess_image(img_path, model_key):
+    size = MODEL_IMG_SIZES.get(model_key, 48)
+
+    image = Image.open(img_path).convert('RGB').resize((size, size))
+    arr = np.array(image, dtype=np.float32) / 255.0
+
     return np.expand_dims(arr, axis=0)
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -157,6 +165,7 @@ def predict():
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
+
         f = request.files['file']
         if f.filename == '':
             return jsonify({'error': 'No file selected'}), 400
@@ -168,23 +177,25 @@ def predict():
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
         f.save(file_path)
 
-        # Load model on demand
         model = get_model(model_key)
 
-        X          = preprocess_image(file_path)
-        pred       = model.predict(X, verbose=0)
+        # ✅ Use model-specific preprocessing
+        X = preprocess_image(file_path, model_key)
+
+        pred = model.predict(X, verbose=0)
         pred_class = int(np.argmax(pred, axis=1)[0])
         confidence = float(np.max(pred) * 100)
-        label      = CLASSES.get(pred_class, 'Unknown')
+        label = CLASSES.get(pred_class, 'Unknown')
 
         os.remove(file_path)
 
         print(f"[{model_key.upper()}] class={pred_class} | conf={confidence:.1f}% | label={label}")
+
         return jsonify({
-            'result':     label,
+            'result': label,
             'confidence': f"{confidence:.1f}",
-            'model':      model_key.upper(),
-            'class_id':   pred_class,
+            'model': model_key.upper(),
+            'class_id': pred_class,
         })
 
     except Exception as e:
