@@ -28,9 +28,9 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 # ── Google Drive file IDs ─────────────────────────────────────────────────
 DRIVE_IDS = {
-    'cnn': '1psjxfGW49Vba3GV48EBEh8KYpfjmjGaV',
-    'eff': '1koRU7i3Vyf-bzR9P5KzYWHAh-TvpglxR',
-    'mob': '1SYylYwKafSRGh66nca8hsts8jTzgYKcj',
+    'cnn': '1aL5YZVqdY7yOBhTCHBWccyV1zBBzzlZh',
+    'eff': '1EmJIAoRSsyeM5btNgEviDv5TapNehJJm',
+    'mob': '1SFwKU9pXo6rLtRb4UXWDolOph8AVg61f',
 }
 MODEL_FILENAMES = {
     'cnn': 'TSR_best.keras',
@@ -112,7 +112,7 @@ def get_model(key):
         model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
 
     _model_cache[key] = model
-    print(f"  ✓ '{key}' ready")
+    print(f"  '{key}' ready")
     return model
 
 # ── Class names ───────────────────────────────────────────────────────────
