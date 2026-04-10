@@ -48,7 +48,7 @@ def log(msg):
     print(msg, flush=True)
 
 
-# ---------------- CNN ARCHITECTURE ----------------
+# ---------------- CNN (EXACT SAME AS TRAINING) ----------------
 def build_cnn():
     model = Sequential([
         Input(shape=(48, 48, 3)),
@@ -152,7 +152,7 @@ CLASSES = {
 }
 
 
-# ---------------- OPTIMIZED PREPROCESSING ----------------
+# ---------------- FIXED PREPROCESSING ----------------
 def preprocess_image(img_path, model_key):
     size = MODEL_IMG_SIZES[model_key]
 
@@ -160,16 +160,8 @@ def preprocess_image(img_path, model_key):
 
     arr = np.array(img, dtype=np.float32)
 
-    # Normalize
+    # IMPORTANT: match training (most likely used this)
     arr = arr / 255.0
-
-    # Standardization (boosts confidence)
-    mean = np.mean(arr)
-    std = np.std(arr) + 1e-7
-    arr = (arr - mean) / std
-
-    # Stability clipping
-    arr = np.clip(arr, -3, 3)
 
     return np.expand_dims(arr, axis=0)
 
@@ -203,7 +195,7 @@ def predict():
 
         start = time.time()
         pred = model.predict(X, verbose=0)
-        print(f"{model_key} prediction took {time.time() - start:.2f}s")
+        log(f"{model_key} prediction took {time.time() - start:.2f}s")
 
         pred_class = int(np.argmax(pred))
         confidence = float(np.max(pred) * 100)
