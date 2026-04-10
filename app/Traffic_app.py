@@ -16,6 +16,7 @@ import gdown
 
 app = Flask(__name__)
 
+# ── Config ────────────────────────────────────────────────────────────────
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -105,11 +106,13 @@ def get_model(key):
         return _model_cache[key]
 
     dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
+
     if not os.path.exists(dest):
         print(f"Downloading '{key}' from Google Drive ...")
         gdown.download(id=DRIVE_IDS[key], output=dest, quiet=False)
 
     print(f"Loading '{key}' ...")
+
     if key == 'cnn':
         model = build_cnn()
         model.load_weights(dest)
@@ -117,7 +120,8 @@ def get_model(key):
         model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
 
     _model_cache[key] = model
-    print(f"  '{key}' ready")
+    print(f"'{key}' ready")
+
     return model
 
 # ── Class names ───────────────────────────────────────────────────────────
@@ -171,18 +175,27 @@ def predict():
             return jsonify({'error': 'No file selected'}), 400
 
         model_key = request.form.get('model', 'cnn')
+
         if model_key not in AVAILABLE_MODELS:
             return jsonify({'error': f"Invalid model. Choose from: {AVAILABLE_MODELS}"}), 400
 
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
         f.save(file_path)
 
+        # 🔥 MEMORY SAFE: clear previous model
+        _model_cache.clear()
+
         model = get_model(model_key)
 
-        # ✅ Use model-specific preprocessing
         X = preprocess_image(file_path, model_key)
+        print("MODEL:", model_key, "| INPUT SHAPE:", X.shape)
 
-        pred = model.predict(X, verbose=0)
+        try:
+            pred = model.predict(X, verbose=0)
+        except Exception as pred_err:
+            print("Prediction error:", pred_err)
+            return jsonify({'error': 'Model prediction failed'}), 500
+
         pred_class = int(np.argmax(pred, axis=1)[0])
         confidence = float(np.max(pred) * 100)
         label = CLASSES.get(pred_class, 'Unknown')
@@ -201,8 +214,10 @@ def predict():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        print("ERROR:", str(e))
+        return jsonify({'error': 'An error occurred.'}), 500
 
+# ── Run ───────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
