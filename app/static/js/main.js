@@ -1,15 +1,38 @@
 $(document).ready(function () {
     console.log("JS loaded");
 
-    // Show hint when switching to heavy models
-    $('#modelSelect').on('change', function () {
-        var selected = $(this).val();
-        if (selected === 'eff' || selected === 'mob') {
-            $('#model-hint').text('⚠️ First prediction may take up to 2 min while the model loads.');
-        } else {
-            $('#model-hint').text('');
-        }
-    });
+    var pollInterval = null;
+
+    function setButtonLoading(isLoading, text) {
+        $('#btn-predict').prop('disabled', isLoading).text(text);
+    }
+
+    function startReadyPolling() {
+        setButtonLoading(true, 'Models loading...');
+        $('#model-hint').text('⏳ Server is loading models, this takes ~2 min on first start.');
+
+        pollInterval = setInterval(function () {
+            $.getJSON('/ready', function (data) {
+                if (data.all_ready) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    setButtonLoading(false, 'Predict');
+                    $('#model-hint').text('✅ All models ready!');
+                    setTimeout(function () { $('#model-hint').text(''); }, 3000);
+                } else {
+                    var parts = [];
+                    $.each(data.models, function (key, status) {
+                        if (status !== 'ready') {
+                            parts.push(key.toUpperCase() + ': ' + status);
+                        }
+                    });
+                    $('#model-hint').text('⏳ Still loading: ' + parts.join(', '));
+                }
+            });
+        }, 3000);
+    }
+
+    startReadyPolling();
 
     $(document).on('click', '#btn-predict', function (e) {
         e.preventDefault();
@@ -27,11 +50,7 @@ $(document).ready(function () {
 
         $('#result-box').hide();
         $('#result-error').hide();
-
-        var loadingText = (selectedModel === 'eff' || selectedModel === 'mob')
-            ? 'Loading model — please wait...'
-            : 'Predicting...';
-        $('#btn-predict').prop('disabled', true).text(loadingText);
+        setButtonLoading(true, 'Predicting...');
 
         $.ajax({
             url:         '/predict',
@@ -39,10 +58,9 @@ $(document).ready(function () {
             data:        form_data,
             contentType: false,
             processData: false,
-            timeout:     270000,   // 4.5 min — slightly longer than server's 4 min wait
+            timeout:     30000,
 
             success: function (data) {
-                $('#model-hint').text('');
                 if (data.error) {
                     $('#result-error').text("Error: " + data.error).show();
                 } else {
@@ -59,7 +77,7 @@ $(document).ready(function () {
             error: function (xhr, textStatus) {
                 var msg = "An error occurred.";
                 if (textStatus === 'timeout') {
-                    msg = 'Request timed out. The server may be overloaded — please try again.';
+                    msg = 'Request timed out. Please try again.';
                 } else {
                     try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) {}
                 }
@@ -67,7 +85,7 @@ $(document).ready(function () {
             },
 
             complete: function () {
-                $('#btn-predict').prop('disabled', false).text('Predict');
+                setButtonLoading(false, 'Predict');
             }
         });
     });

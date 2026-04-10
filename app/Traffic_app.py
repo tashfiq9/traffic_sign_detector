@@ -22,11 +22,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 NUM_CLASSES = 43
 
-MODEL_IMG_SIZES = {
-    'cnn': 48,
-    'eff': 96,
-    'mob': 96,
-}
+MODEL_IMG_SIZES = {'cnn': 48, 'eff': 96, 'mob': 96}
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(APP_DIR, 'models')
@@ -45,21 +41,12 @@ MODEL_FILENAMES = {
 
 AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
-# ── Per-model threading primitives ────────────────────────────────────────
 _model_cache   = {}
-_load_locks    = {key: threading.Lock()  for key in AVAILABLE_MODELS}
-_predict_locks = {key: threading.Lock()  for key in AVAILABLE_MODELS}
-
-# KEY FIX: threading.Event per model.
-# The warmup thread calls .set() when a model is ready.
-# Any /predict request for that model calls .wait(timeout) and simply
-# BLOCKS until the event fires — no 503, no client retries needed.
-_model_events  = {key: threading.Event() for key in AVAILABLE_MODELS}
-
-# Human-readable status for /ready endpoint only
+_load_locks    = {key: threading.Lock() for key in AVAILABLE_MODELS}
+_predict_locks = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _warmup_status = {key: 'pending' for key in AVAILABLE_MODELS}
 
-# ── Custom preprocessing layers ───────────────────────────────────────────
+
 class EfficientNetPreprocess(tf.keras.layers.Layer):
     def call(self, x):
         return eff_preprocess(x * 255.0)
@@ -77,73 +64,54 @@ CUSTOM_OBJECTS = {
     'MobileNetPreprocess':    MobileNetPreprocess,
 }
 
-# ── CNN architecture ──────────────────────────────────────────────────────
+
 def build_cnn():
     model = Sequential([
-        Input(shape=(MODEL_IMG_SIZES['cnn'], MODEL_IMG_SIZES['cnn'], 3)),
-        Conv2D(32, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(32, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPool2D(pool_size=(2,2)),
-        Dropout(0.2),
-        Conv2D(64, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(64, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPool2D(pool_size=(2,2)),
-        Dropout(0.2),
-        Conv2D(128, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(128, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPool2D(pool_size=(2,2)),
-        Dropout(0.2),
+        Input(shape=(48, 48, 3)),
+        Conv2D(32, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        Conv2D(32, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        MaxPool2D((2,2)), Dropout(0.2),
+        Conv2D(64, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        Conv2D(64, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        MaxPool2D((2,2)), Dropout(0.2),
+        Conv2D(128, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        Conv2D(128, (3,3), padding='same', activation='relu'), BatchNormalization(),
+        MaxPool2D((2,2)), Dropout(0.2),
         Flatten(),
-        Dense(512, activation='relu'),
-        BatchNormalization(),
-        Dropout(0.4),
+        Dense(512, activation='relu'), BatchNormalization(), Dropout(0.4),
         Dense(NUM_CLASSES, activation='softmax')
     ])
     return model
 
 
 def _download_model(key, dest):
-    """Download model with retry. Deletes corrupt files before retrying."""
     MAX_RETRIES = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             if os.path.exists(dest):
                 os.remove(dest)
-            print(f"Downloading '{key}' from Google Drive (attempt {attempt}/{MAX_RETRIES}) ...")
+            print(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
             gdown.download(id=DRIVE_IDS[key], output=dest, quiet=False)
             if os.path.exists(dest) and os.path.getsize(dest) > 1024:
-                print(f"  ✓ Download of '{key}' complete ({os.path.getsize(dest) // 1024} KB)")
+                print(f"  ✓ '{key}' downloaded ({os.path.getsize(dest)//1024} KB)")
                 return
-            raise RuntimeError(f"Downloaded file for '{key}' is missing or too small.")
+            raise RuntimeError("File missing or too small after download.")
         except Exception as e:
-            print(f"  ✗ Download attempt {attempt} failed: {e}")
+            print(f"  ✗ Attempt {attempt} failed: {e}")
             if attempt == MAX_RETRIES:
-                raise RuntimeError(
-                    f"Failed to download model '{key}' after {MAX_RETRIES} attempts: {e}"
-                )
+                raise RuntimeError(f"Failed to download '{key}': {e}")
 
 
 def get_model(key):
-    """Load model on first use — thread-safe."""
     if key in _model_cache:
         return _model_cache[key]
-
     with _load_locks[key]:
         if key in _model_cache:
             return _model_cache[key]
-
         _warmup_status[key] = 'loading'
         dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
-
         if not os.path.exists(dest) or os.path.getsize(dest) < 1024:
             _download_model(key, dest)
-
         print(f"Loading '{key}' ...")
         try:
             if key == 'cnn':
@@ -155,17 +123,14 @@ def get_model(key):
             _warmup_status[key] = 'failed'
             if os.path.exists(dest):
                 os.remove(dest)
-            raise RuntimeError(f"Failed to load model '{key}': {e}")
-
-        _model_cache[key]  = model
+            raise RuntimeError(f"Failed to load '{key}': {e}")
+        _model_cache[key] = model
         _warmup_status[key] = 'ready'
-        _model_events[key].set()   # ← unblocks any waiting /predict requests
-        print(f"  ✓ '{key}' ready (input: {MODEL_IMG_SIZES[key]}x{MODEL_IMG_SIZES[key]})")
+        print(f"  ✓ '{key}' ready")
         return model
 
 
 def _warmup_all_models():
-    """Background thread: loads all models at startup, one at a time."""
     print("[Warmup] Starting ...")
     for key in AVAILABLE_MODELS:
         try:
@@ -173,7 +138,6 @@ def _warmup_all_models():
             print(f"[Warmup] '{key}' ✓")
         except Exception as e:
             _warmup_status[key] = 'failed'
-            _model_events[key].set()   # unblock waiters even on failure
             print(f"[Warmup] '{key}' FAILED: {e}")
     print("[Warmup] Done.")
 
@@ -181,7 +145,6 @@ def _warmup_all_models():
 threading.Thread(target=_warmup_all_models, daemon=True).start()
 
 
-# ── Class names ───────────────────────────────────────────────────────────
 CLASSES = {
     0:'Speed limit (20km/h)',        1:'Speed limit (30km/h)',
     2:'Speed limit (50km/h)',        3:'Speed limit (60km/h)',
@@ -215,7 +178,6 @@ def preprocess_image(img_path, model_key):
     return np.expand_dims(arr, axis=0)
 
 
-# ── Routes ────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template('index.html', available_models=AVAILABLE_MODELS)
@@ -223,12 +185,11 @@ def index():
 
 @app.route('/ready')
 def ready():
-    """Health-check: visit /ready to see warmup progress."""
     all_ready = all(s == 'ready' for s in _warmup_status.values())
     return jsonify({
-        'status': 'ready' if all_ready else 'warming_up',
+        'all_ready': all_ready,
         'models': _warmup_status,
-    }), 200 if all_ready else 503
+    }), 200 if all_ready else 202
 
 
 @app.route('/predict', methods=['POST'])
@@ -243,18 +204,13 @@ def predict():
 
         model_key = request.form.get('model', 'cnn')
         if model_key not in AVAILABLE_MODELS:
-            return jsonify({'error': f"Invalid model. Choose from: {AVAILABLE_MODELS}"}), 400
+            return jsonify({'error': 'Invalid model.'}), 400
 
-        # ── BLOCK here until the model is ready (max 4 minutes) ──────────
-        # This is the key fix: instead of returning 503 and making the
-        # client retry, we simply wait server-side. The gunicorn gthread
-        # worker keeps other threads free while this one waits.
-        MODEL_LOAD_TIMEOUT = 240  # seconds
-        is_ready = _model_events[model_key].wait(timeout=MODEL_LOAD_TIMEOUT)
-        if not is_ready:
-            return jsonify({'error': 'Model took too long to load. Please try again.'}), 503
-        if _warmup_status[model_key] == 'failed':
-            return jsonify({'error': f"Model '{model_key.upper()}' failed to load. Please redeploy."}), 503
+        status = _warmup_status.get(model_key)
+        if status == 'failed':
+            return jsonify({'error': f"Model '{model_key.upper()}' failed to load."}), 503
+        if status != 'ready':
+            return jsonify({'error': f"Model '{model_key.upper()}' is not ready yet. Please wait."}), 503
 
         filename    = secure_filename(f.filename)
         unique_name = f"{threading.get_ident()}_{filename}"
