@@ -1,0 +1,94 @@
+/* ── Image preview ──────────────────────────────────────────────────── */
+.img-preview {
+    width: 256px;
+    height: 256px;
+    position: relative;
+    border: 5px solid #F8F8F8;
+    box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+    margin-top: 1em;
+    margin-bottom: 1em;
+}
+
+/* ── Upload label ───────────────────────────────────────────────────── */
+.upload-label {
+    display: inline-block;
+    padding: 12px 30px;
+    background: #39D2B4;
+    color: #fff;
+    cursor: pointer;
+}
+.upload-label:hover {
+    background: #34495E;
+    color: #39D2B4;
+}
+
+/* ── Model selector ─────────────────────────────────────────────────── */
+.model-select {
+    padding: 7px 12px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 0.95em;
+    background: #fff;
+    color: #34495E;
+    cursor: pointer;
+    min-width: 220px;
+}
+.model-select:focus {
+    outline: none;
+    border-color: #39D2B4;
+    box-shadow: 0 0 0 2px rgba(57, 210, 180, 0.2);
+}
+
+/* ── Result card ────────────────────────────────────────────────────── */
+.result-card {
+    border: 1px solid #dee2e6;
+    border-left: 4px solid #39D2B4;
+    border-radius: 4px;
+    padding: 1em 1.4em;
+    background: #f8f9fa;
+    max-width: 480px;
+}
+.result-label {
+    font-size: 0.78em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6c757d;
+    margin-bottom: 0.3em;
+}
+.result-value {
+    font-size: 1.25em;
+    font-weight: 600;
+    color: #212529;
+    margin-bottom: 0.5em;
+}
+.result-meta {
+    font-size: 0.88em;
+    color: #6c757d;
+}
+
+/* ── Model badge (inside result) ────────────────────────────────────── */
+.badge-model {
+    display: inline-block;
+    padding: 2px 8px;
+    background: #39D2B4;
+    color: #fff;
+    border-radius: 3px;
+    font-size: 0.82em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+/* ── Loader spinner ─────────────────────────────────────────────────── */
+.loader {
+    border: 8px solid #f3f3f3;
+    border-top: 8px solid #3498db;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    animation: spin 1s linear infinite;
+}
+@keyframes spin {
+    0%   { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}

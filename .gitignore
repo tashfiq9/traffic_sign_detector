@@ -1,0 +1,7 @@
+training/
+Train/
+Test/
+Meta/
+*.csv
+*.npy
+*.h5
