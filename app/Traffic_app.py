@@ -94,15 +94,20 @@ def build_cnn():
 
 def _download_model(key, dest):
     """
-    Download from Google Drive using requests with explicit timeouts.
-    gdown was silently hanging — requests gives us full timeout control.
-    Protected by a lock so two threads never write the same file.
+    Download from Google Drive using the new usercontent.google.com URL.
+    The old drive.google.com/uc?export=download URL now returns an HTML
+    warning page instead of the file. The new URL bypasses that entirely.
     """
     file_id = DRIVE_IDS[key]
     MAX_RETRIES = 3
 
+    # New Google Drive direct download URL (works without confirmation cookies)
+    DOWNLOAD_URL = (
+        f"https://drive.usercontent.google.com/download"
+        f"?id={file_id}&export=download&authuser=0&confirm=t"
+    )
+
     with _download_file_lock:
-        # Re-check inside lock — another thread may have finished already
         if os.path.exists(dest) and os.path.getsize(dest) > 1024 * 100:
             log(f"  '{key}' already on disk, skipping download.")
             return
@@ -115,31 +120,14 @@ def _download_model(key, dest):
 
                 log(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
 
-                session = _requests.Session()
-                url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
-                # 30s to connect, 300s to read — will never hang forever
-                resp = session.get(url, stream=True, timeout=(30, 300))
+                resp = _requests.get(
+                    DOWNLOAD_URL,
+                    stream=True,
+                    timeout=(30, 300),
+                    headers={'User-Agent': 'Mozilla/5.0'},
+                )
                 resp.raise_for_status()
 
-                # Handle Google Drive's large-file confirmation cookie
-                confirm_token = None
-                for k, v in resp.cookies.items():
-                    if k.startswith('download_warning'):
-                        confirm_token = v
-                        break
-
-                if confirm_token:
-                    log(f"  '{key}': following Drive confirmation ...")
-                    resp = session.get(
-                        url,
-                        params={'confirm': confirm_token},
-                        stream=True,
-                        timeout=(30, 300),
-                    )
-                    resp.raise_for_status()
-
-                # Stream to tmp file in 1 MB chunks
                 total = 0
                 with open(tmp, 'wb') as f:
                     for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -150,10 +138,10 @@ def _download_model(key, dest):
                 if total < 1024 * 100:
                     raise RuntimeError(
                         f"File too small after download ({total} bytes) — "
-                        "probably received an HTML error page instead of the model."
+                        "probably received an HTML error page."
                     )
 
-                os.replace(tmp, dest)   # atomic rename — no partial files on disk
+                os.replace(tmp, dest)
                 log(f"  ✓ '{key}' downloaded ({total // 1024} KB)")
                 return
 
