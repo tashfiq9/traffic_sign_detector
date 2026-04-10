@@ -22,7 +22,6 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 NUM_CLASSES = 43
 
-# ── Per-model image sizes ─────────────────────────────────────────────────
 MODEL_IMG_SIZES = {
     'cnn': 48,
     'eff': 96,
@@ -33,7 +32,6 @@ APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(APP_DIR, 'models')
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# ── Google Drive file IDs ─────────────────────────────────────────────────
 DRIVE_IDS = {
     'cnn': '1aL5YZVqdY7yOBhTCHBWccyV1zBBzzlZh',
     'eff': '1EmJIAoRSsyeM5btNgEviDv5TapNehJJm',
@@ -48,11 +46,12 @@ MODEL_FILENAMES = {
 AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
 # ── Thread-safe model cache ───────────────────────────────────────────────
-# FIX 1: One lock per model key to prevent concurrent load/download races.
-# FIX 2: One predict lock per model to prevent concurrent TF graph execution.
 _model_cache   = {}
 _load_locks    = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _predict_locks = {key: threading.Lock() for key in AVAILABLE_MODELS}
+
+# ── Warmup status — lets /ready report progress to the browser ────────────
+_warmup_status = {key: 'pending' for key in AVAILABLE_MODELS}
 
 # ── Custom preprocessing layers ───────────────────────────────────────────
 class EfficientNetPreprocess(tf.keras.layers.Layer):
@@ -104,19 +103,14 @@ def build_cnn():
 
 
 def _download_model(key, dest):
-    """Download model from Google Drive with retry logic.
-    FIX 3: Removes corrupt/incomplete files before retrying so a bad
-    download never gets cached on disk and reused on the next restart.
-    """
+    """Download model with retry. Deletes corrupt files before retrying."""
     MAX_RETRIES = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            # Remove any previously broken download
             if os.path.exists(dest):
                 os.remove(dest)
             print(f"Downloading '{key}' from Google Drive (attempt {attempt}/{MAX_RETRIES}) ...")
             gdown.download(id=DRIVE_IDS[key], output=dest, quiet=False)
-            # Verify the file is non-empty
             if os.path.exists(dest) and os.path.getsize(dest) > 1024:
                 print(f"  ✓ Download of '{key}' complete ({os.path.getsize(dest) // 1024} KB)")
                 return
@@ -130,20 +124,17 @@ def _download_model(key, dest):
 
 
 def get_model(key):
-    """Download (if needed) and load a model on first use — thread-safe."""
-    # Fast path: already loaded
+    """Load model on first use — thread-safe with double-checked locking."""
     if key in _model_cache:
         return _model_cache[key]
 
-    # FIX 1: Acquire per-model lock so only one thread loads/downloads at a time.
     with _load_locks[key]:
-        # Double-checked locking: another thread may have loaded while we waited.
         if key in _model_cache:
             return _model_cache[key]
 
+        _warmup_status[key] = 'loading'
         dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
 
-        # Download if not on disk (or if the file looks corrupt / too small)
         if not os.path.exists(dest) or os.path.getsize(dest) < 1024:
             _download_model(key, dest)
 
@@ -155,15 +146,37 @@ def get_model(key):
             else:
                 model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
         except Exception as e:
-            # If loading fails the file on disk may be corrupt — delete it so
-            # the next request triggers a fresh download instead of re-failing.
+            _warmup_status[key] = 'failed'
             if os.path.exists(dest):
                 os.remove(dest)
             raise RuntimeError(f"Failed to load model '{key}': {e}")
 
         _model_cache[key] = model
+        _warmup_status[key] = 'ready'
         print(f"  ✓ '{key}' ready (input size: {MODEL_IMG_SIZES[key]}x{MODEL_IMG_SIZES[key]})")
         return model
+
+
+def _warmup_all_models():
+    """
+    Runs in a background thread at startup.
+    Loads all 3 models ONE AT A TIME (sequential) to avoid OOM on
+    Render's 512 MB free tier. After this finishes, every predict
+    request is instant — no cold download ever happens mid-request.
+    """
+    print("[Warmup] Starting background model warmup ...")
+    for key in AVAILABLE_MODELS:   # cnn first (smallest), then eff, then mob
+        try:
+            get_model(key)
+            print(f"[Warmup] '{key}' ✓")
+        except Exception as e:
+            print(f"[Warmup] '{key}' FAILED: {e}")
+    print("[Warmup] All models ready.")
+
+
+# Start warmup immediately when gunicorn imports this module.
+# daemon=True so the thread doesn't block a clean shutdown.
+threading.Thread(target=_warmup_all_models, daemon=True).start()
 
 
 # ── Class names ───────────────────────────────────────────────────────────
@@ -192,7 +205,7 @@ CLASSES = {
     42:'End no passing vehicle > 3.5 tons'
 }
 
-# ── Preprocessing ─────────────────────────────────────────────────────────
+
 def preprocess_image(img_path, model_key):
     img_size = MODEL_IMG_SIZES[model_key]
     image = Image.open(img_path).convert('RGB').resize((img_size, img_size))
@@ -204,6 +217,16 @@ def preprocess_image(img_path, model_key):
 @app.route('/')
 def index():
     return render_template('index.html', available_models=AVAILABLE_MODELS)
+
+
+@app.route('/ready')
+def ready():
+    """Health-check: visit /ready in your browser to see warmup progress."""
+    all_ready = all(s == 'ready' for s in _warmup_status.values())
+    return jsonify({
+        'status': 'ready' if all_ready else 'warming_up',
+        'models': _warmup_status,
+    }), 200 if all_ready else 503
 
 
 @app.route('/predict', methods=['POST'])
@@ -220,20 +243,26 @@ def predict():
         if model_key not in AVAILABLE_MODELS:
             return jsonify({'error': f"Invalid model. Choose from: {AVAILABLE_MODELS}"}), 400
 
-        # Save upload
-        filename  = secure_filename(f.filename)
-        # Use thread id in filename to avoid collisions between concurrent requests
+        # Block the request with a clear message if warmup hasn't finished yet.
+        # This prevents gunicorn from timing out mid-download.
+        status = _warmup_status.get(model_key, 'pending')
+        if status in ('pending', 'loading'):
+            return jsonify({
+                'error': f"Model '{model_key.upper()}' is still loading, please wait a moment and try again."
+            }), 503
+        if status == 'failed':
+            return jsonify({
+                'error': f"Model '{model_key.upper()}' failed to load on startup. Please redeploy."
+            }), 503
+
+        filename    = secure_filename(f.filename)
         unique_name = f"{threading.get_ident()}_{filename}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
+        file_path   = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
         f.save(file_path)
 
-        # Load model (thread-safe lazy load)
         model = get_model(model_key)
+        X     = preprocess_image(file_path, model_key)
 
-        # Preprocess
-        X = preprocess_image(file_path, model_key)
-
-        # FIX 4: Serialise TF predictions per model to avoid TF threading bugs.
         with _predict_locks[model_key]:
             pred = model.predict(X, verbose=0)
 
@@ -255,7 +284,6 @@ def predict():
         return jsonify({'error': str(e)}), 500
 
     finally:
-        # FIX 2: Always clean up the temp file, even if an exception occurred.
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
