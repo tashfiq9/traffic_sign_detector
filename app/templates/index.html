@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2>Upload Traffic Sign 🚦</h2>
+<p style="color:#6c757d; margin-top:-0.4em; margin-bottom:1.2em; font-size:0.95em;">
+    Upload a traffic sign image and choose a model to classify it.
+</p>
+
+<form id="upload-file" enctype="multipart/form-data" onsubmit="return false;">
+    <input type="file" name="file" id="imageUpload" accept=".png,.jpg,.jpeg">
+</form>
+
+<br>
+
+<div style="margin-bottom: 1em;">
+    <label for="modelSelect" style="font-weight:500; margin-right:0.5em;">Model:</label>
+    <select id="modelSelect" class="model-select">
+        {% if 'cnn' in available_models %}
+        <option value="cnn">Custom CNN (~93%)</option>
+        {% endif %}
+        {% if 'eff' in available_models %}
+        <option value="eff">EfficientNetB0 (~97–99%)</option>
+        {% endif %}
+        {% if 'mob' in available_models %}
+        <option value="mob">MobileNetV2 (~95–97%)</option>
+        {% endif %}
+    </select>
+</div>
+
+<div id="model-hint-wrap" style="display:flex; align-items:center; margin-top:0.6em; gap:0.5em; flex-wrap:wrap;">
+    <button id="btn-predict" type="button" class="btn btn-primary">Predict</button>
+    <span id="model-hint" style="font-size:0.9em; color:#e67e22;"></span>
+</div>
+
+<div id="result-box" style="display:none; margin-top:1.5em;">
+    <div class="result-card">
+        <div class="result-label">Prediction</div>
+        <div id="result-text" class="result-value"></div>
+        <div id="result-meta" class="result-meta"></div>
+    </div>
+</div>
+
+<div id="result-error" style="display:none; margin-top:1em; color:#dc3545; font-weight:500;"></div>
+
+{% endblock %}
