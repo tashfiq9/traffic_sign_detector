@@ -46,6 +46,9 @@ _load_locks    = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _predict_locks = {key: threading.Lock() for key in AVAILABLE_MODELS}
 _warmup_status = {key: 'pending' for key in AVAILABLE_MODELS}
 
+# ── Per-file download lock to prevent two workers writing the same file ──
+_download_file_lock = threading.Lock()
+
 
 class EfficientNetPreprocess(tf.keras.layers.Layer):
     def call(self, x):
@@ -85,21 +88,29 @@ def build_cnn():
 
 
 def _download_model(key, dest):
+    """Download with a process-wide lock so two workers never write the same file."""
     MAX_RETRIES = 3
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            if os.path.exists(dest):
-                os.remove(dest)
-            print(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
-            gdown.download(id=DRIVE_IDS[key], output=dest, quiet=False)
-            if os.path.exists(dest) and os.path.getsize(dest) > 1024:
-                print(f"  ✓ '{key}' downloaded ({os.path.getsize(dest)//1024} KB)")
-                return
-            raise RuntimeError("File missing or too small after download.")
-        except Exception as e:
-            print(f"  ✗ Attempt {attempt} failed: {e}")
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(f"Failed to download '{key}': {e}")
+    with _download_file_lock:
+        # Re-check inside the lock — another thread may have finished already
+        if os.path.exists(dest) and os.path.getsize(dest) > 1024 * 100:
+            print(f"  '{key}' already on disk, skipping download.")
+            return
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                tmp = dest + '.tmp'
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                print(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
+                gdown.download(id=DRIVE_IDS[key], output=tmp, quiet=False)
+                if os.path.exists(tmp) and os.path.getsize(tmp) > 1024 * 100:
+                    os.replace(tmp, dest)   # atomic rename — no partial files
+                    print(f"  ✓ '{key}' downloaded ({os.path.getsize(dest) // 1024} KB)")
+                    return
+                raise RuntimeError("File missing or too small after download.")
+            except Exception as e:
+                print(f"  ✗ Attempt {attempt} failed: {e}")
+                if attempt == MAX_RETRIES:
+                    raise RuntimeError(f"Failed to download '{key}' after {MAX_RETRIES} attempts: {e}")
 
 
 def get_model(key):
@@ -110,7 +121,7 @@ def get_model(key):
             return _model_cache[key]
         _warmup_status[key] = 'loading'
         dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
-        if not os.path.exists(dest) or os.path.getsize(dest) < 1024:
+        if not os.path.exists(dest) or os.path.getsize(dest) < 1024 * 100:
             _download_model(key, dest)
         print(f"Loading '{key}' ...")
         try:
@@ -121,8 +132,12 @@ def get_model(key):
                 model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
         except Exception as e:
             _warmup_status[key] = 'failed'
+            # Remove potentially corrupt file so next retry re-downloads
             if os.path.exists(dest):
-                os.remove(dest)
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
             raise RuntimeError(f"Failed to load '{key}': {e}")
         _model_cache[key] = model
         _warmup_status[key] = 'ready'
@@ -185,11 +200,22 @@ def index():
 
 @app.route('/ready')
 def ready():
-    all_ready = all(s == 'ready' for s in _warmup_status.values())
+    statuses   = dict(_warmup_status)
+    all_ready  = all(s == 'ready'  for s in statuses.values())
+    any_failed = any(s == 'failed' for s in statuses.values())
+
+    if all_ready:
+        code = 200
+    elif any_failed:
+        code = 503   # client JS can detect this as a hard failure
+    else:
+        code = 202   # still loading
+
     return jsonify({
-        'all_ready': all_ready,
-        'models': _warmup_status,
-    }), 200 if all_ready else 202
+        'all_ready':  all_ready,
+        'any_failed': any_failed,
+        'models':     statuses,
+    }), code
 
 
 @app.route('/predict', methods=['POST'])
@@ -208,7 +234,7 @@ def predict():
 
         status = _warmup_status.get(model_key)
         if status == 'failed':
-            return jsonify({'error': f"Model '{model_key.upper()}' failed to load."}), 503
+            return jsonify({'error': f"Model '{model_key.upper()}' failed to load. Try reloading the page."}), 503
         if status != 'ready':
             return jsonify({'error': f"Model '{model_key.upper()}' is not ready yet. Please wait."}), 503
 
