@@ -19,8 +19,15 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-IMG_SIZE    = 48
 NUM_CLASSES = 43
+
+# ── Per-model image sizes ─────────────────────────────────────────────────
+# CNN was trained at 48x48; EfficientNet & MobileNet were trained at 96x96
+MODEL_IMG_SIZES = {
+    'cnn': 48,
+    'eff': 96,
+    'mob': 96,
+}
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(APP_DIR, 'models')
@@ -65,7 +72,7 @@ CUSTOM_OBJECTS = {
 # ── CNN architecture ──────────────────────────────────────────────────────
 def build_cnn():
     model = Sequential([
-        Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+        Input(shape=(MODEL_IMG_SIZES['cnn'], MODEL_IMG_SIZES['cnn'], 3)),
         Conv2D(32, (3,3), padding='same', activation='relu'),
         BatchNormalization(),
         Conv2D(32, (3,3), padding='same', activation='relu'),
@@ -112,7 +119,7 @@ def get_model(key):
         model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
 
     _model_cache[key] = model
-    print(f"  ✓ '{key}' ready")
+    print(f"  ✓ '{key}' ready (input size: {MODEL_IMG_SIZES[key]}x{MODEL_IMG_SIZES[key]})")
     return model
 
 # ── Class names ───────────────────────────────────────────────────────────
@@ -141,9 +148,10 @@ CLASSES = {
     42:'End no passing vehicle > 3.5 tons'
 }
 
-# ── Preprocessing ─────────────────────────────────────────────────────────
-def preprocess_image(img_path):
-    image = Image.open(img_path).convert('RGB').resize((IMG_SIZE, IMG_SIZE))
+# ── Preprocessing — uses the correct size per model ───────────────────────
+def preprocess_image(img_path, model_key):
+    img_size = MODEL_IMG_SIZES[model_key]
+    image = Image.open(img_path).convert('RGB').resize((img_size, img_size))
     arr   = np.array(image, dtype=np.float32) / 255.0
     return np.expand_dims(arr, axis=0)
 
@@ -171,7 +179,8 @@ def predict():
         # Load model on demand
         model = get_model(model_key)
 
-        X          = preprocess_image(file_path)
+        # ── FIX: pass model_key so the correct img size is used ──────────
+        X          = preprocess_image(file_path, model_key)
         pred       = model.predict(X, verbose=0)
         pred_class = int(np.argmax(pred, axis=1)[0])
         confidence = float(np.max(pred) * 100)
