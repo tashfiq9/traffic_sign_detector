@@ -34,261 +34,127 @@ DRIVE_IDS = {
     'eff': '1EmJIAoRSsyeM5btNgEviDv5TapNehJJm',
     'mob': '1SFwKU9pXo6rLtRb4UXWDolOph8AVg61f',
 }
+
 MODEL_FILENAMES = {
     'cnn': 'TSR_best.keras',
     'eff': 'EfficientNetB0_fixed.keras',
     'mob': 'MobileNetV2_fixed.keras',
 }
 
-AVAILABLE_MODELS    = ['cnn', 'eff', 'mob']
-_model_cache        = {}
-_load_locks         = {key: threading.Lock() for key in AVAILABLE_MODELS}
-_predict_locks      = {key: threading.Lock() for key in AVAILABLE_MODELS}
-_model_ready        = {key: False for key in AVAILABLE_MODELS}
-_download_file_lock = threading.Lock()
+AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
-MAX_DOWNLOAD_SECONDS = 180
+_model_cache = {}
+_load_locks  = {key: threading.Lock() for key in AVAILABLE_MODELS}
 
 def log(msg):
     print(msg, flush=True)
-    sys.stdout.flush()
 
-# ------------------- Custom layers for transfer learning -------------------
-class EfficientNetPreprocess(tf.keras.layers.Layer):
-    def call(self, x):
-        return eff_preprocess(x * 255.0)
-    def get_config(self):
-        return super().get_config()
-
-class MobileNetPreprocess(tf.keras.layers.Layer):
-    def call(self, x):
-        return mob_preprocess(x * 255.0)
-    def get_config(self):
-        return super().get_config()
-
-CUSTOM_OBJECTS = {
-    'EfficientNetPreprocess': EfficientNetPreprocess,
-    'MobileNetPreprocess':    MobileNetPreprocess,
-}
-
-# ------------------- CNN architecture (same as before) -------------------
+# ---------------- CNN ----------------
 def build_cnn():
     model = Sequential([
         Input(shape=(48, 48, 3)),
-        Conv2D(32, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        Conv2D(32, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPool2D((2,2)), Dropout(0.2),
-        Conv2D(64, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        Conv2D(64, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPool2D((2,2)), Dropout(0.2),
-        Conv2D(128, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        Conv2D(128, (3,3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPool2D((2,2)), Dropout(0.2),
+        Conv2D(32, (3,3), activation='relu'), MaxPool2D(),
+        Conv2D(64, (3,3), activation='relu'), MaxPool2D(),
         Flatten(),
-        Dense(512, activation='relu'), BatchNormalization(), Dropout(0.4),
+        Dense(128, activation='relu'),
         Dense(NUM_CLASSES, activation='softmax')
     ])
     return model
 
-# ------------------- Download helper -------------------
-def _download_model(key, dest):
+# ---------------- Download ----------------
+def download_model(key, dest):
     file_id = DRIVE_IDS[key]
-    MAX_RETRIES = 3
-    DOWNLOAD_URL = (
-        f"https://drive.usercontent.google.com/download"
-        f"?id={file_id}&export=download&authuser=0&confirm=t"
-    )
-    with _download_file_lock:
-        if os.path.exists(dest) and os.path.getsize(dest) > 1024 * 100:
-            log(f"  '{key}' already on disk, skipping download.")
-            return
-        for attempt in range(1, MAX_RETRIES + 1):
-            tmp = dest + '.tmp'
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-                log(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
-                t_start = time.time()
-                resp = _requests.get(
-                    DOWNLOAD_URL,
-                    stream=True,
-                    timeout=(30, 60),
-                    headers={'User-Agent': 'Mozilla/5.0'},
-                )
-                resp.raise_for_status()
-                total = 0
-                with open(tmp, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                            total += len(chunk)
-                        if time.time() - t_start > MAX_DOWNLOAD_SECONDS:
-                            raise RuntimeError(f"Download exceeded {MAX_DOWNLOAD_SECONDS}s")
-                if total < 1024 * 100:
-                    raise RuntimeError(f"File too small ({total} bytes)")
-                os.replace(tmp, dest)
-                log(f"  ✓ '{key}' downloaded ({total // 1024} KB in {time.time()-t_start:.1f}s)")
-                return
-            except Exception as e:
-                log(f"  ✗ Attempt {attempt} failed: {e}")
-                if os.path.exists(tmp):
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
-                if attempt < MAX_RETRIES:
-                    time.sleep(10)
-                else:
-                    raise RuntimeError(f"Failed to download '{key}': {e}")
+    url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
 
-# ------------------- Model loader (synchronous, thread‑safe) -------------------
+    log(f"Downloading {key}...")
+    r = _requests.get(url, stream=True)
+
+    with open(dest, "wb") as f:
+        for chunk in r.iter_content(1024 * 1024):
+            if chunk:
+                f.write(chunk)
+
+# ---------------- Load Model (LAZY) ----------------
 def get_model(key):
+    if key in _model_cache:
+        return _model_cache[key]
+
     with _load_locks[key]:
         if key in _model_cache:
             return _model_cache[key]
-        # Download if needed
-        dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
-        if not os.path.exists(dest) or os.path.getsize(dest) < 1024 * 100:
-            _download_model(key, dest)
-        log(f"Loading '{key}' ...")
-        try:
-            if key == 'cnn':
-                model = build_cnn()
-                model.load_weights(dest)
-            else:
-                model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
-        except Exception as e:
-            _model_ready[key] = False
-            if os.path.exists(dest):
-                try:
-                    os.remove(dest)
-                except OSError:
-                    pass
-            raise RuntimeError(f"Failed to load '{key}': {e}")
+
+        path = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
+
+        if not os.path.exists(path):
+            download_model(key, path)
+
+        log(f"Loading {key}...")
+
+        if key == 'cnn':
+            model = build_cnn()
+            model.load_weights(path)
+        else:
+            model = load_model(path, compile=False)
+
         _model_cache[key] = model
-        _model_ready[key] = True
-        log(f"  ✓ '{key}' ready")
         return model
 
-# ------------------- Synchronous warmup (called once at worker startup) -------------------
-def warmup_models():
-    log("[Warmup] Starting synchronous model loading...")
-    for key in AVAILABLE_MODELS:
-        try:
-            get_model(key)
-        except Exception as e:
-            _model_ready[key] = False
-            log(f"[Warmup] '{key}' FAILED: {e}")
-    log("[Warmup] Done.")
+# ---------------- Classes ----------------
+CLASSES = {i: f"Class {i}" for i in range(43)}
 
-# Call warmup immediately when the module is loaded (will run in each worker)
-warmup_models()
+# ---------------- Preprocess ----------------
+def preprocess(img_path, model_key):
+    size = MODEL_IMG_SIZES[model_key]
+    img = Image.open(img_path).convert('RGB').resize((size, size))
+    arr = np.array(img) / 255.0
+    return np.expand_dims(arr, 0)
 
-# ------------------- Class names -------------------
-CLASSES = {
-    0:'Speed limit (20km/h)',        1:'Speed limit (30km/h)',
-    2:'Speed limit (50km/h)',        3:'Speed limit (60km/h)',
-    4:'Speed limit (70km/h)',        5:'Speed limit (80km/h)',
-    6:'End of speed limit (80km/h)', 7:'Speed limit (100km/h)',
-    8:'Speed limit (120km/h)',       9:'No passing',
-    10:'No passing veh over 3.5 tons', 11:'Right-of-way at intersection',
-    12:'Priority road',              13:'Yield',
-    14:'Stop',                       15:'No vehicles',
-    16:'Vehicle > 3.5 tons prohibited', 17:'No entry',
-    18:'General caution',            19:'Dangerous curve left',
-    20:'Dangerous curve right',      21:'Double curve',
-    22:'Bumpy road',                 23:'Slippery road',
-    24:'Road narrows on the right',  25:'Road work',
-    26:'Traffic signals',            27:'Pedestrians',
-    28:'Children crossing',          29:'Bicycles crossing',
-    30:'Beware of ice/snow',         31:'Wild animals crossing',
-    32:'End speed + passing limits', 33:'Turn right ahead',
-    34:'Turn left ahead',            35:'Ahead only',
-    36:'Go straight or right',       37:'Go straight or left',
-    38:'Keep right',                 39:'Keep left',
-    40:'Roundabout mandatory',       41:'End of no passing',
-    42:'End no passing vehicle > 3.5 tons'
-}
-
-def preprocess_image(img_path, model_key):
-    img_size = MODEL_IMG_SIZES[model_key]
-    image = Image.open(img_path).convert('RGB').resize((img_size, img_size))
-    arr   = np.array(image, dtype=np.float32) / 255.0
-    return np.expand_dims(arr, axis=0)
-
-# ------------------- Routes -------------------
+# ---------------- Routes ----------------
 @app.route('/')
 def index():
     return render_template('index.html', available_models=AVAILABLE_MODELS)
 
 @app.route('/ready')
 def ready():
-    # Return 200 only when ALL models are ready, otherwise 202 (still loading) or 503 (failed)
-    all_ready = all(_model_ready.get(k, False) for k in AVAILABLE_MODELS)
-    any_failed = any(not _model_ready.get(k, False) for k in AVAILABLE_MODELS)
-    if all_ready:
-        return jsonify({'all_ready': True, 'any_failed': False, 'models': _model_ready}), 200
-    elif any_failed:
-        return jsonify({'all_ready': False, 'any_failed': True, 'models': _model_ready}), 503
-    else:
-        return jsonify({'all_ready': False, 'any_failed': False, 'models': _model_ready}), 202
+    # Always ready (no blocking warmup anymore)
+    return jsonify({'all_ready': True})
 
 @app.route('/predict', methods=['POST'])
 def predict():
     file_path = None
+
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
         f = request.files['file']
-        if f.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
         model_key = request.form.get('model', 'cnn')
-        if model_key not in AVAILABLE_MODELS:
-            return jsonify({'error': 'Invalid model.'}), 400
-
-        if not _model_ready.get(model_key, False):
-            return jsonify({'error': f"Model '{model_key.upper()}' is not ready yet. Please wait."}), 503
 
         filename = secure_filename(f.filename)
-        unique_name = f"{threading.get_ident()}_{filename}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         f.save(file_path)
 
         model = get_model(model_key)
-        X = preprocess_image(file_path, model_key)
 
-        # Time the prediction
-        start_time = time.time()
-        with _predict_locks[model_key]:
-            pred = model.predict(X, verbose=0)
-        elapsed = time.time() - start_time
-        log(f"[{model_key.upper()}] Prediction took {elapsed:.2f} seconds")
+        X = preprocess(file_path, model_key)
 
-        pred_class = int(np.argmax(pred, axis=1)[0])
+        start = time.time()
+        pred = model.predict(X)
+        log(f"Prediction time: {time.time() - start:.2f}s")
+
+        pred_class = int(np.argmax(pred))
         confidence = float(np.max(pred) * 100)
-        label = CLASSES.get(pred_class, 'Unknown')
 
-        log(f"[{model_key.upper()}] class={pred_class} | conf={confidence:.1f}% | label={label}")
         return jsonify({
-            'result': label,
+            'result': CLASSES[pred_class],
             'confidence': f"{confidence:.1f}",
             'model': model_key.upper(),
-            'class_id': pred_class,
+            'class_id': pred_class
         })
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)})
 
     finally:
         if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+            os.remove(file_path)
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run()
