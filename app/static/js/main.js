@@ -116,7 +116,6 @@ $(document).ready(function () {
         $('#result-box').hide();
         $('#result-error').hide();
         setButtonLoading(true, 'Predicting...');
-        // Show a progress message
         $('#model-hint').text('⏳ Processing image (may take 30-90 seconds)...');
 
         $.ajax({
@@ -125,7 +124,7 @@ $(document).ready(function () {
             data:        form_data,
             contentType: false,
             processData: false,
-            timeout:     120000,   // increased from 60s to 120s
+            timeout:     180000,   // 3 minutes
 
             success: function (data) {
                 if (data.error) {
@@ -139,13 +138,13 @@ $(document).ready(function () {
                     );
                     $('#result-box').show();
                 }
-                $('#model-hint').text('');  // clear progress message
+                $('#model-hint').text('');
             },
 
             error: function (xhr, textStatus) {
                 var msg = "An error occurred.";
                 if (textStatus === 'timeout') {
-                    msg = 'Request timed out. The server took too long. Please try again with a smaller model (e.g., Custom CNN).';
+                    msg = 'Request timed out after 3 minutes. The server is too slow. Please try again with a smaller image or contact support.';
                 } else {
                     try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) {}
                 }

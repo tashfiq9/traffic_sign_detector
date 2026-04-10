@@ -90,7 +90,7 @@ def build_cnn():
     ])
     return model
 
-# ------------------- Download helper (same as before) -------------------
+# ------------------- Download helper -------------------
 def _download_model(key, dest):
     file_id = DRIVE_IDS[key]
     MAX_RETRIES = 3
@@ -258,8 +258,12 @@ def predict():
         model = get_model(model_key)
         X = preprocess_image(file_path, model_key)
 
+        # Time the prediction
+        start_time = time.time()
         with _predict_locks[model_key]:
             pred = model.predict(X, verbose=0)
+        elapsed = time.time() - start_time
+        log(f"[{model_key.upper()}] Prediction took {elapsed:.2f} seconds")
 
         pred_class = int(np.argmax(pred, axis=1)[0])
         confidence = float(np.max(pred) * 100)
