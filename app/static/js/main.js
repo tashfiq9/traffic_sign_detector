@@ -3,7 +3,7 @@ $(document).ready(function () {
 
     var pollInterval = null;
     var pollAttempts = 0;
-    var MAX_POLL_ATTEMPTS = 120; // 120 × 3s = 6 minutes max wait
+    var MAX_POLL_ATTEMPTS = 200; // 200 × 3s = 10 minutes max wait
 
     function setButtonLoading(isLoading, text) {
         $('#btn-predict').prop('disabled', isLoading).text(text);
@@ -66,28 +66,24 @@ $(document).ready(function () {
                         setButtonLoading(true, 'Model error');
                         $('#model-hint').html(
                             '❌ Failed to load: <strong>' + failedModels.join(', ') + '</strong>. ' +
-                            'This may be a Google Drive download issue.'
+                            'Click Retry to try again.'
                         );
                         showRetryButton();
                         return;
                     }
 
-                    // Still loading — show progress
-                    var progressMsg = '⏳ Still loading: ' + loadingModels.join(', ');
                     var percent = Math.min(Math.round((pollAttempts / MAX_POLL_ATTEMPTS) * 100), 95);
-                    $('#model-hint').text(progressMsg + ' (' + percent + '% wait time used)');
+                    $('#model-hint').text('⏳ Still loading: ' + loadingModels.join(', ') + ' (' + percent + '%)');
 
-                    // Timeout guard
                     if (pollAttempts >= MAX_POLL_ATTEMPTS) {
                         stopPolling();
                         setButtonLoading(true, 'Timed out');
-                        $('#model-hint').text('⚠️ Models are taking too long to load. The server may be overloaded.');
+                        $('#model-hint').text('⚠️ Models are taking too long. The server may be overloaded.');
                         showRetryButton();
                     }
                 },
 
                 error: function (xhr, textStatus) {
-                    // Network error or server down — keep trying unless timed out
                     console.warn('Poll error:', textStatus, xhr.status);
                     if (pollAttempts >= MAX_POLL_ATTEMPTS) {
                         stopPolling();
@@ -147,7 +143,7 @@ $(document).ready(function () {
             error: function (xhr, textStatus) {
                 var msg = "An error occurred.";
                 if (textStatus === 'timeout') {
-                    msg = 'Request timed out. The model may still be loading — please wait and try again.';
+                    msg = 'Request timed out. Please try again.';
                 } else {
                     try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) {}
                 }

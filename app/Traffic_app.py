@@ -1,9 +1,11 @@
 from flask import Flask, render_template, request, jsonify
 import os
+import sys
 import threading
 from werkzeug.utils import secure_filename
 import numpy as np
 from PIL import Image
+import requests as _requests
 
 import tensorflow as tf
 from keras.models import load_model, Sequential
@@ -13,7 +15,6 @@ from keras.layers import (
 )
 from keras.applications.efficientnet import preprocess_input as eff_preprocess
 from keras.applications.mobilenet_v2 import preprocess_input as mob_preprocess
-import gdown
 
 app = Flask(__name__)
 
@@ -41,13 +42,17 @@ MODEL_FILENAMES = {
 
 AVAILABLE_MODELS = ['cnn', 'eff', 'mob']
 
-_model_cache   = {}
-_load_locks    = {key: threading.Lock() for key in AVAILABLE_MODELS}
-_predict_locks = {key: threading.Lock() for key in AVAILABLE_MODELS}
-_warmup_status = {key: 'pending' for key in AVAILABLE_MODELS}
-
-# ── Per-file download lock to prevent two workers writing the same file ──
+_model_cache        = {}
+_load_locks         = {key: threading.Lock() for key in AVAILABLE_MODELS}
+_predict_locks      = {key: threading.Lock() for key in AVAILABLE_MODELS}
+_warmup_status      = {key: 'pending' for key in AVAILABLE_MODELS}
 _download_file_lock = threading.Lock()
+
+
+def log(msg):
+    """Print with immediate flush — gunicorn buffers stdout by default."""
+    print(msg, flush=True)
+    sys.stdout.flush()
 
 
 class EfficientNetPreprocess(tf.keras.layers.Layer):
@@ -88,29 +93,81 @@ def build_cnn():
 
 
 def _download_model(key, dest):
-    """Download with a process-wide lock so two workers never write the same file."""
+    """
+    Download from Google Drive using requests with explicit timeouts.
+    gdown was silently hanging — requests gives us full timeout control.
+    Protected by a lock so two threads never write the same file.
+    """
+    file_id = DRIVE_IDS[key]
     MAX_RETRIES = 3
+
     with _download_file_lock:
-        # Re-check inside the lock — another thread may have finished already
+        # Re-check inside lock — another thread may have finished already
         if os.path.exists(dest) and os.path.getsize(dest) > 1024 * 100:
-            print(f"  '{key}' already on disk, skipping download.")
+            log(f"  '{key}' already on disk, skipping download.")
             return
+
         for attempt in range(1, MAX_RETRIES + 1):
+            tmp = dest + '.tmp'
             try:
-                tmp = dest + '.tmp'
                 if os.path.exists(tmp):
                     os.remove(tmp)
-                print(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
-                gdown.download(id=DRIVE_IDS[key], output=tmp, quiet=False)
-                if os.path.exists(tmp) and os.path.getsize(tmp) > 1024 * 100:
-                    os.replace(tmp, dest)   # atomic rename — no partial files
-                    print(f"  ✓ '{key}' downloaded ({os.path.getsize(dest) // 1024} KB)")
-                    return
-                raise RuntimeError("File missing or too small after download.")
+
+                log(f"Downloading '{key}' (attempt {attempt}/{MAX_RETRIES}) ...")
+
+                session = _requests.Session()
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+
+                # 30s to connect, 300s to read — will never hang forever
+                resp = session.get(url, stream=True, timeout=(30, 300))
+                resp.raise_for_status()
+
+                # Handle Google Drive's large-file confirmation cookie
+                confirm_token = None
+                for k, v in resp.cookies.items():
+                    if k.startswith('download_warning'):
+                        confirm_token = v
+                        break
+
+                if confirm_token:
+                    log(f"  '{key}': following Drive confirmation ...")
+                    resp = session.get(
+                        url,
+                        params={'confirm': confirm_token},
+                        stream=True,
+                        timeout=(30, 300),
+                    )
+                    resp.raise_for_status()
+
+                # Stream to tmp file in 1 MB chunks
+                total = 0
+                with open(tmp, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            total += len(chunk)
+
+                if total < 1024 * 100:
+                    raise RuntimeError(
+                        f"File too small after download ({total} bytes) — "
+                        "probably received an HTML error page instead of the model."
+                    )
+
+                os.replace(tmp, dest)   # atomic rename — no partial files on disk
+                log(f"  ✓ '{key}' downloaded ({total // 1024} KB)")
+                return
+
             except Exception as e:
-                print(f"  ✗ Attempt {attempt} failed: {e}")
+                log(f"  ✗ Attempt {attempt} failed: {e}")
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
                 if attempt == MAX_RETRIES:
-                    raise RuntimeError(f"Failed to download '{key}' after {MAX_RETRIES} attempts: {e}")
+                    raise RuntimeError(
+                        f"Failed to download '{key}' after {MAX_RETRIES} attempts: {e}"
+                    )
 
 
 def get_model(key):
@@ -123,7 +180,7 @@ def get_model(key):
         dest = os.path.join(MODEL_DIR, MODEL_FILENAMES[key])
         if not os.path.exists(dest) or os.path.getsize(dest) < 1024 * 100:
             _download_model(key, dest)
-        print(f"Loading '{key}' ...")
+        log(f"Loading '{key}' ...")
         try:
             if key == 'cnn':
                 model = build_cnn()
@@ -132,7 +189,6 @@ def get_model(key):
                 model = load_model(dest, compile=False, custom_objects=CUSTOM_OBJECTS)
         except Exception as e:
             _warmup_status[key] = 'failed'
-            # Remove potentially corrupt file so next retry re-downloads
             if os.path.exists(dest):
                 try:
                     os.remove(dest)
@@ -141,20 +197,20 @@ def get_model(key):
             raise RuntimeError(f"Failed to load '{key}': {e}")
         _model_cache[key] = model
         _warmup_status[key] = 'ready'
-        print(f"  ✓ '{key}' ready")
+        log(f"  ✓ '{key}' ready")
         return model
 
 
 def _warmup_all_models():
-    print("[Warmup] Starting ...")
+    log("[Warmup] Starting ...")
     for key in AVAILABLE_MODELS:
         try:
             get_model(key)
-            print(f"[Warmup] '{key}' ✓")
+            log(f"[Warmup] '{key}' ✓")
         except Exception as e:
             _warmup_status[key] = 'failed'
-            print(f"[Warmup] '{key}' FAILED: {e}")
-    print("[Warmup] Done.")
+            log(f"[Warmup] '{key}' FAILED: {e}")
+    log("[Warmup] Done.")
 
 
 threading.Thread(target=_warmup_all_models, daemon=True).start()
@@ -207,9 +263,9 @@ def ready():
     if all_ready:
         code = 200
     elif any_failed:
-        code = 503   # client JS can detect this as a hard failure
+        code = 503
     else:
-        code = 202   # still loading
+        code = 202
 
     return jsonify({
         'all_ready':  all_ready,
@@ -253,7 +309,7 @@ def predict():
         confidence = float(np.max(pred) * 100)
         label      = CLASSES.get(pred_class, 'Unknown')
 
-        print(f"[{model_key.upper()}] class={pred_class} | conf={confidence:.1f}% | label={label}")
+        log(f"[{model_key.upper()}] class={pred_class} | conf={confidence:.1f}% | label={label}")
         return jsonify({
             'result':     label,
             'confidence': f"{confidence:.1f}",

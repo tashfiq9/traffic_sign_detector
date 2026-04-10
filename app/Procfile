@@ -1,1 +1,1 @@
-web: gunicorn Traffic_app:app --worker-class gthread --workers 1 --threads 4 --timeout 300
+web: PYTHONUNBUFFERED=1 gunicorn Traffic_app:app --worker-class gthread --workers 1 --threads 4 --timeout 300
