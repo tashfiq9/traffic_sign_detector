@@ -1,132 +1,93 @@
 """
-resave_models.py  —  run ONCE from F:\\project\\
+resave_models.py  —  run ONCE from F:\\project3\\
     python resave_models.py
-
-Rebuilds EfficientNetB0 and MobileNetV2 using a Rescaling layer instead of
-a Lambda layer (Lambda causes shape-inference errors in newer Keras).
-Loads weights from the old files and re-saves clean new ones.
 """
-
-import os
+import os, json, zipfile, shutil, tempfile
 import tensorflow as tf
-from keras.applications import EfficientNetB0, MobileNetV2
-from keras.applications.efficientnet import preprocess_input as eff_preprocess
-from keras.applications.mobilenet_v2 import preprocess_input as mob_preprocess
-from keras.layers import (
-    GlobalAveragePooling2D, BatchNormalization,
-    Dropout, Dense, Rescaling
-)
 
-IMG_SIZE    = 48
-NUM_CLASSES = 43
-TRAIN_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'training')
+TRAIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'training')
 
+def strip_renorm_from_keras_file(src_path, dst_path):
+    """
+    A .keras file is a zip. This opens it, patches the config.json
+    to remove renorm/renorm_clipping/renorm_momentum from every
+    BatchNormalization layer, then writes a new .keras file.
+    """
+    RENORM_KEYS = {'renorm', 'renorm_clipping', 'renorm_momentum'}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Custom preprocessing layers (replace Lambda — no shape inference issues)
-# ─────────────────────────────────────────────────────────────────────────────
+    def strip_renorm(obj):
+        """Recursively remove renorm keys from any dict."""
+        if isinstance(obj, dict):
+            # If this looks like a BatchNormalization config, strip the keys
+            if obj.get('class_name') == 'BatchNormalization' and 'config' in obj:
+                for k in RENORM_KEYS:
+                    obj['config'].pop(k, None)
+            # Also strip directly from any dict that has these keys
+            for k in RENORM_KEYS:
+                obj.pop(k, None)
+            for v in obj.values():
+                strip_renorm(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                strip_renorm(item)
+        return obj
 
-class EfficientNetPreprocess(tf.keras.layers.Layer):
-    """Scales [0,1] → [0,255] then applies EfficientNet preprocessing."""
-    def call(self, x):
-        return eff_preprocess(x * 255.0)
-    def get_config(self):
-        return super().get_config()
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        # Extract the zip
+        with zipfile.ZipFile(src_path, 'r') as zin:
+            zin.extractall(tmp_dir)
 
+        # Patch config.json
+        config_path = os.path.join(tmp_dir, 'config.json')
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
 
-class MobileNetPreprocess(tf.keras.layers.Layer):
-    """Scales [0,1] → [0,255] then applies MobileNetV2 preprocessing."""
-    def call(self, x):
-        return mob_preprocess(x * 255.0)
-    def get_config(self):
-        return super().get_config()
+        config = strip_renorm(config)
 
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Architecture builders
-# ─────────────────────────────────────────────────────────────────────────────
+        # Repack into new .keras zip
+        with zipfile.ZipFile(dst_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for root, _, files in os.walk(tmp_dir):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    arcname  = os.path.relpath(full_path, tmp_dir)
+                    zout.write(full_path, arcname)
 
-def build_efficientnet():
-    inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='input_layer')
-
-    x = EfficientNetPreprocess(name='efficientnet_preprocess')(inputs)
-
-    base = EfficientNetB0(
-        include_top=False,
-        weights='imagenet',
-        input_shape=(IMG_SIZE, IMG_SIZE, 3),
-        pooling=None
-    )
-    base.trainable = True
-    for layer in base.layers[:100]:
-        layer.trainable = False
-
-    x = base(x, training=False)
-    x = GlobalAveragePooling2D(name='gap')(x)
-    x = BatchNormalization(name='head_bn1')(x)
-    x = Dropout(0.4, name='head_drop1')(x)
-    x = Dense(256, activation='relu', name='head_dense1')(x)
-    x = BatchNormalization(name='head_bn2')(x)
-    x = Dropout(0.3, name='head_drop2')(x)
-    outputs = Dense(NUM_CLASSES, activation='softmax', name='predictions')(x)
-
-    return tf.keras.Model(inputs, outputs, name='EfficientNetB0_TSR')
+        print(f"  Patched config written to: {dst_path}")
+    finally:
+        shutil.rmtree(tmp_dir)
 
 
-def build_mobilenet():
-    inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='input_layer')
-
-    x = MobileNetPreprocess(name='mobilenet_preprocess')(inputs)
-
-    base = MobileNetV2(
-        include_top=False,
-        weights='imagenet',
-        input_shape=(IMG_SIZE, IMG_SIZE, 3),
-        alpha=1.0
-    )
-    base.trainable = True
-    for layer in base.layers[:100]:
-        layer.trainable = False
-
-    x = base(x, training=False)
-    x = GlobalAveragePooling2D(name='gap')(x)
-    x = BatchNormalization(name='head_bn1')(x)
-    x = Dropout(0.4, name='head_drop1')(x)
-    x = Dense(256, activation='relu', name='head_dense1')(x)
-    x = BatchNormalization(name='head_bn2')(x)
-    x = Dropout(0.3, name='head_drop2')(x)
-    outputs = Dense(NUM_CLASSES, activation='softmax', name='predictions')(x)
-
-    return tf.keras.Model(inputs, outputs, name='MobileNetV2_TSR')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Re-save EfficientNet
-# ─────────────────────────────────────────────────────────────────────────────
-old_eff = os.path.join(TRAIN_DIR, 'EfficientNetB0_phase2_best.keras')
-new_eff = os.path.join(TRAIN_DIR, 'EfficientNetB0_fixed.keras')
+# ── EfficientNetB0 ────────────────────────────────────────────────────────────
+old_eff     = os.path.join(TRAIN_DIR, 'EfficientNetB0_phase2_best.keras')
+patched_eff = os.path.join(TRAIN_DIR, 'EfficientNetB0_patched.keras')
+new_eff     = os.path.join(TRAIN_DIR, 'EfficientNetB0_fixed.keras')
 
 print("=" * 60)
-print("Rebuilding EfficientNetB0 ...")
-eff_model = build_efficientnet()
-print(f"Loading weights from: {old_eff}")
-eff_model.load_weights(old_eff)
+print("Patching EfficientNetB0 config ...")
+strip_renorm_from_keras_file(old_eff, patched_eff)
+print("Loading patched EfficientNetB0 ...")
+eff_model = tf.keras.models.load_model(patched_eff, safe_mode=False)
 eff_model.save(new_eff)
+os.remove(patched_eff)
 print(f"✓ Saved to: {new_eff}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Re-save MobileNetV2
-# ─────────────────────────────────────────────────────────────────────────────
-old_mob = os.path.join(TRAIN_DIR, 'MobileNetV2_phase2_best.keras')
-new_mob = os.path.join(TRAIN_DIR, 'MobileNetV2_fixed.keras')
+# ── MobileNetV2 ───────────────────────────────────────────────────────────────
+old_mob     = os.path.join(TRAIN_DIR, 'MobileNetV2_phase2_best.keras')
+patched_mob = os.path.join(TRAIN_DIR, 'MobileNetV2_patched.keras')
+new_mob     = os.path.join(TRAIN_DIR, 'MobileNetV2_fixed.keras')
 
 print("=" * 60)
-print("Rebuilding MobileNetV2 ...")
-mob_model = build_mobilenet()
-print(f"Loading weights from: {old_mob}")
-mob_model.load_weights(old_mob)
+print("Patching MobileNetV2 config ...")
+strip_renorm_from_keras_file(old_mob, patched_mob)
+print("Loading patched MobileNetV2 ...")
+mob_model = tf.keras.models.load_model(patched_mob, safe_mode=False)
 mob_model.save(new_mob)
+os.remove(patched_mob)
 print(f"✓ Saved to: {new_mob}")
 
 print("=" * 60)
-print("All done! Now run Traffic_app.py — all 3 models should load.")
+print("All done!")
