@@ -1,0 +1,9 @@
+flask
+werkzeug
+numpy
+pillow
+tensorflow-cpu
+keras
+requests
+gunicorn
+gdown
