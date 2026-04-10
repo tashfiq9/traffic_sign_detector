@@ -50,7 +50,6 @@ $(document).ready(function () {
                         return;
                     }
 
-                    // Check for any failed models
                     var failedModels = [];
                     var loadingModels = [];
                     $.each(data.models, function (key, status) {
@@ -117,6 +116,8 @@ $(document).ready(function () {
         $('#result-box').hide();
         $('#result-error').hide();
         setButtonLoading(true, 'Predicting...');
+        // Show a progress message
+        $('#model-hint').text('⏳ Processing image (may take 30-90 seconds)...');
 
         $.ajax({
             url:         '/predict',
@@ -124,7 +125,7 @@ $(document).ready(function () {
             data:        form_data,
             contentType: false,
             processData: false,
-            timeout:     60000,
+            timeout:     120000,   // increased from 60s to 120s
 
             success: function (data) {
                 if (data.error) {
@@ -138,16 +139,18 @@ $(document).ready(function () {
                     );
                     $('#result-box').show();
                 }
+                $('#model-hint').text('');  // clear progress message
             },
 
             error: function (xhr, textStatus) {
                 var msg = "An error occurred.";
                 if (textStatus === 'timeout') {
-                    msg = 'Request timed out. Please try again.';
+                    msg = 'Request timed out. The server took too long. Please try again with a smaller model (e.g., Custom CNN).';
                 } else {
                     try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) {}
                 }
                 $('#result-error').text("Error: " + msg).show();
+                $('#model-hint').text('');
             },
 
             complete: function () {

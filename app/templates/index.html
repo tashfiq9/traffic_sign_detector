@@ -16,7 +16,7 @@
     <label for="modelSelect" style="font-weight:500; margin-right:0.5em;">Model:</label>
     <select id="modelSelect" class="model-select">
         {% if 'cnn' in available_models %}
-        <option value="cnn">Custom CNN (~93%)</option>
+        <option value="cnn" selected>Custom CNN (~93%)</option>
         {% endif %}
         {% if 'eff' in available_models %}
         <option value="eff">EfficientNetB0 (~97–99%)</option>
